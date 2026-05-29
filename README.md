@@ -14,6 +14,7 @@ An interactive sales analytics dashboard built with **Streamlit** and **Plotly**
 - [Architecture](#architecture)
 - [Getting Started](#getting-started)
 - [Usage](#usage)
+- [Connect CSV to Live Database](#connect-csv-to-live-database)
 - [Dashboard Layout](#dashboard-layout)
 - [ETL Pipeline](#etl-pipeline)
 - [Business Logic & Insights](#business-logic--insights)
@@ -32,7 +33,7 @@ This project demonstrates an end-to-end analytics workflow:
 2. **Clean & enrich** records with derived metrics (profit margin, cost basis)
 3. **Visualize** performance through KPI cards and interactive charts
 
-The main entry point is `app.py`, which generates data in memory, caches it with Streamlit, and renders a wide-layout dashboard. A standalone script, `etl_pipeline.py`, can export the same dataset to CSV for offline analysis or use in other BI tools (including Power BI).
+The main entry point is `app.py`, which reads sales data from a **live database** (SQLite by default), caches it with Streamlit, and renders a wide-layout dashboard. CSV data is loaded into the database via `load_csv_to_db.py` or automatically at the end of `etl_pipeline.py`.
 
 ---
 
@@ -57,12 +58,16 @@ The main entry point is `app.py`, which generates data in memory, caches it with
 
 ```
 power_bi-main/
-├── app.py                  # Main Streamlit dashboard application
-├── etl_pipeline.py         # Standalone ETL script; exports cleaned_sales_data.csv
+├── app.py                  # Main Streamlit dashboard (reads from database)
+├── database.py             # Database connection, CSV load, and query helpers
+├── load_csv_to_db.py       # Import cleaned_sales_data.csv into the database
+├── etl_pipeline.py         # ETL script; exports CSV and syncs to database
 ├── cleaned_sales_data.csv  # Pre-generated cleaned dataset (~10,500 rows)
+├── sales.db                # Local SQLite database (created after first load)
+├── .env.example            # Database connection template
 ├── requirements.txt        # Python dependencies
 ├── README.md               # Project documentation
-└── .gitignore              # Ignores venv/
+└── .gitignore              # Ignores venv/, .env, *.db
 ```
 
 ---
@@ -76,6 +81,8 @@ power_bi-main/
 | [Pandas](https://pandas.pydata.org/) | Data manipulation and aggregation |
 | [NumPy](https://numpy.org/) | Random data generation and numerical ops |
 | [Plotly Express](https://plotly.com/python/plotly-express/) | Interactive charts |
+| [SQLAlchemy](https://www.sqlalchemy.org/) | Database connection and CSV import |
+| [python-dotenv](https://github.com/theskumar/python-dotenv) | Load database URL from `.env` |
 
 ### Dependencies
 
@@ -85,6 +92,8 @@ Listed in `requirements.txt`:
 streamlit
 pandas
 plotly
+sqlalchemy
+python-dotenv
 ```
 
 > **Note:** `numpy` is required by the code but not explicitly pinned in `requirements.txt`. It is installed automatically as a Pandas dependency. For reproducible environments, consider adding `numpy` with a version pin.
@@ -128,12 +137,22 @@ plotly
 ## Architecture
 
 ```
+CSV (cleaned_sales_data.csv)
+        │
+        ▼
+  load_csv_to_db.py  ──►  Live Database (SQLite / PostgreSQL / MySQL)
+        │                          │
+        │                          ▼
+  etl_pipeline.py (auto-sync)   app.py (Streamlit dashboard)
+```
+
+```
 ┌─────────────────────────────────────────────────────────────┐
 │                     Streamlit App (app.py)                  │
 ├─────────────────────────────────────────────────────────────┤
-│  1. Page config & custom CSS (dark header, card layout)   │
-│  2. generate_and_clean_data()  [@st.cache_data]             │
-│     └── NumPy random generation → Pandas DataFrame          │
+│  1. Page config & custom CSS                                │
+│  2. load_sales_data()  [@st.cache_data, ttl=60s]            │
+│     └── fetch_sales_data() from database.py                 │
 │  3. KPI metric row (5 columns)                              │
 │  4. Middle charts (3 columns)                               │
 │  5. Bottom charts (4 columns)                               │
@@ -142,12 +161,11 @@ plotly
 ┌─────────────────────────────────────────────────────────────┐
 │              Standalone ETL (etl_pipeline.py)               │
 ├─────────────────────────────────────────────────────────────┤
-│  Generate data → Introduce missing discounts (1%) → Clean   │
-│  → Feature engineering → Export cleaned_sales_data.csv      │
+│  Generate data → Clean → Export CSV → Sync to database      │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-**Important:** The dashboard (`app.py`) generates its own in-memory dataset and does **not** read `cleaned_sales_data.csv`. The CSV is produced separately by `etl_pipeline.py` for external use.
+The dashboard reads from the **live database**, not directly from the CSV file. Reload the CSV into the database whenever your file changes.
 
 ---
 
@@ -189,21 +207,95 @@ plotly
 
 ## Usage
 
-### Run the Dashboard
+### Step 1 — Load CSV into the Database (first time)
+
+```bash
+python load_csv_to_db.py
+```
+
+This reads `cleaned_sales_data.csv` and stores all rows in the `sales_orders` table inside `sales.db` (SQLite).
+
+### Step 2 — Run the Dashboard
 
 ```bash
 streamlit run app.py
 ```
 
-Streamlit opens the app in your browser (default: `http://localhost:8501`).
+Streamlit opens the app in your browser (default: `http://localhost:8501`). The dashboard reads live data from the database and refreshes every 60 seconds.
 
-### Generate Cleaned CSV (Optional)
+### Generate Fresh Data (Optional)
 
 ```bash
 python etl_pipeline.py
 ```
 
-This creates or overwrites `cleaned_sales_data.csv` in the project root. You can import this file into Excel, Power BI, Tableau, or other analytics tools.
+This generates new mock data, saves `cleaned_sales_data.csv`, and **automatically syncs it to the database**.
+
+---
+
+## Connect CSV to Live Database
+
+### How it works
+
+| Step | What happens |
+|------|----------------|
+| 1 | Your sales data lives in `cleaned_sales_data.csv` |
+| 2 | `load_csv_to_db.py` imports the CSV into a database table (`sales_orders`) |
+| 3 | `app.py` queries the database — not the CSV file directly |
+| 4 | When the CSV updates, re-run `load_csv_to_db.py` (or `etl_pipeline.py`) to refresh the database |
+
+This gives you a **single source of truth** in the database. The dashboard always shows what's in the DB, and you can connect other tools (Power BI, Excel, etc.) to the same database.
+
+### Default: SQLite (easiest — no server install)
+
+SQLite is a file-based database. After running `load_csv_to_db.py`, you'll see `sales.db` in the project folder. No extra setup required.
+
+### Use PostgreSQL or MySQL (production)
+
+1. Copy the environment template:
+
+   ```bash
+   copy .env.example .env
+   ```
+
+2. Edit `.env` with your connection string:
+
+   ```env
+   # PostgreSQL
+   DATABASE_URL=postgresql+psycopg2://username:password@localhost:5432/sales_db
+
+   # MySQL
+   DATABASE_URL=mysql+pymysql://username:password@localhost:3306/sales_db
+   ```
+
+3. Install the driver:
+
+   ```bash
+   pip install psycopg2-binary   # PostgreSQL
+   pip install pymysql           # MySQL
+   ```
+
+4. Load your CSV:
+
+   ```bash
+   python load_csv_to_db.py
+   ```
+
+5. Run the dashboard:
+
+   ```bash
+   streamlit run app.py
+   ```
+
+### Update data when CSV changes
+
+Whenever you replace or edit `cleaned_sales_data.csv`, reload it:
+
+```bash
+python load_csv_to_db.py
+```
+
+The dashboard cache refreshes within 60 seconds, or restart Streamlit for an immediate update.
 
 ---
 
@@ -298,17 +390,7 @@ Orders for **Tables** in the **South** region are assigned **negative profit** (
 
 ### Connect the Dashboard to CSV
 
-To use the exported file instead of in-memory generation, replace the data load in `app.py`:
-
-```python
-@st.cache_data
-def load_data():
-    df = pd.read_csv('cleaned_sales_data.csv', parse_dates=['order_date'])
-    df['year'] = df['order_date'].dt.year
-    return df
-
-df = load_data()
-```
+The dashboard no longer reads CSV directly. Use `load_csv_to_db.py` to import your file into the database first.
 
 ### Change Record Count
 
@@ -326,11 +408,10 @@ Streamlit widgets (e.g., `st.selectbox`, `st.date_input`) can be added above the
 
 ## Limitations
 
-- **Synthetic data only** — No live database or API integration
+- **Cloud Warehousing Layer (Supabase PostgreSQL):** Secure relational cloud data management. Serves as the high-availability core database repository handling complex query operations.
 - **No authentication** — Dashboard is open to anyone with access to the running server
-- **Data source split** — `app.py` and `etl_pipeline.py` duplicate generation logic; they are not synchronized via a shared module
+- **Manual CSV reload** — Database does not auto-watch the CSV file; re-run `load_csv_to_db.py` after CSV changes
 - **No automated tests** — Manual verification only
-- **Repository naming** — Named "power_bi" but implements Streamlit; use `cleaned_sales_data.csv` if you need Power BI integration
 
 ---
 

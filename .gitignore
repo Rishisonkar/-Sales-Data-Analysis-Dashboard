@@ -1,1 +1,4 @@
 venv/
+.env
+sales.db
+*.db
